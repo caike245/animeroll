@@ -180,7 +180,7 @@
                     </div>
                 </div>
 
-                <!-- BOTÃO RECOMEÇAR QUESTIONÁRIO MOVIDO PARA CÁ -->
+                <!-- BOTão RECOMEÇAR QUESTIONÁRIO MOVIDO PARA CÁ -->
                 <div class="mt-8 pt-4 border-t border-gray-200">
                     <p class="text-sm text-secondary mb-2">Se você quiser redefinir seu perfil, clique abaixo:</p>
                     <button onclick="resetApp()" class="w-full bg-secondary hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-xl transition duration-300 shadow-md">
@@ -359,7 +359,7 @@
         // === SUAS CREDENCIAIS FORAM INSERIDAS AQUI ===
         // =========================================================================
         
-        // 1. CONFIGURAÇÃO REAL DO PROJETO 'aniroll'
+        // 1. CONFIGURAÇÃO REAL DO PROJETO 'aniroll' (SEUS VALORES REAIS)
         const FIREBASE_CONFIG = {
             apiKey: "AIzaSyD9AszWm6oX4aLUP-tdw-JZ_1t2opJqaiE",
             authDomain: "aniroll.firebaseapp.com",
@@ -370,7 +370,10 @@
             measurementId: "G-ZNJNWCMNNN"
         };
 
-        // 2. O ID do Aplicativo (usado no caminho do Firestore)
+        // 2. Chave da API de Análise (Gemini) - CHAVE CORRIGIDA!
+        const GEMINI_API_KEY = "AIzaSyDxjWn_xkqtO61bdKCY_kFPpHEqDECs0xg"; 
+        
+        // 3. O ID do Aplicativo (usado no caminho do Firestore)
         const appId = FIREBASE_CONFIG.projectId || 'default-app-id'; 
         
         let app, db, auth, userId = 'guest';
@@ -629,7 +632,7 @@
                     } catch (error) {
                         console.error("Erro no login inicial (Anônimo):", error);
                         // Se o login anônimo falhar (ex: por regras de segurança), mostramos a tela inicial
-                        document.getElementById('loading-state').innerHTML = `<p class="text-danger">Erro ao conectar o perfil. Verifique as regras do Firestore. [${error.message}]</p>`;
+                        document.getElementById('loading-state').innerHTML = `<p class="text-danger">Erro ao conectar o perfil. Verifique as regras do Firestore e se a Autenticação Anônima está habilitada. [${error.message}]</p>`;
                         showScreen('start-screen');
                     }
                 }
@@ -1461,7 +1464,7 @@
                 query = `Encontre um anime que NÃO seja: ${excludedAnimes}. O anime deve conter as tags de gênero e elementos narrativos: ${topTags}. Retorne APENAS um objeto JSON. O objeto deve conter: 1) "anime": Nome do Anime. 2) "tags": Array com as tags de gênero/elementos (use tags: ${tagsList}). 3) "sinopse": Uma breve sinopse (1 frase). Retorne APENAS o objeto JSON.`;
             }
 
-            const apiKey = ""; 
+            const apiKey = GEMINI_API_KEY; // AGORA USA A CHAVE DO USUÁRIO
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
 
             const payload = {
@@ -1785,4 +1788,3 @@
     </script>
 </body>
 </html>
-
