@@ -657,31 +657,29 @@
             // seja ele anônimo (persistente no dispositivo)
             const docRef = doc(db, `artifacts/${appId}/users/${userId}/anime_filters`, 'profile');
             
-            // Adicionar listener de snapshot para tempo real
-            onSnapshot(docRef, (docSnap) => {
+            // Usa getDoc para carregar os dados uma vez, evitando race conditions do onSnapshot em testes.
+            getDoc(docRef).then((docSnap) => {
                 if (docSnap.exists()) {
                     const data = docSnap.data();
                     userFilter = data.filterData;
-                    watchedAnimes = data.watchedAnimes || []; // Carrega a lista de assistidos
-                    blockedAnimes = data.blockedAnimes || []; // NOVO: Carrega a lista de bloqueio
+                    watchedAnimes = data.watchedAnimes || [];
+                    blockedAnimes = data.blockedAnimes || [];
                     
-                    console.log("Filtro carregado:", userFilter);
-                    updateWatchedListDisplay(); // Atualiza a exibição da lista assistida
-                    updateBlockListDisplay(); // NOVO: Atualiza a exibição da lista bloqueada
-                    showScreen('main-tabs-screen'); // Mostra a tela de abas principal
-                    changeTab(activeTab); // Garante que a aba ativa seja exibida
+                    console.log("Filtro carregado via getDoc:", userFilter);
+                    updateWatchedListDisplay();
+                    updateBlockListDisplay();
+                    showScreen('main-tabs-screen');
+                    changeTab(activeTab);
                 } else {
                     console.log("Nenhum filtro encontrado. Começando questionário.");
-                    // Garante que as listas estejam vazias se não houver perfil
                     watchedAnimes = [];
                     blockedAnimes = [];
                     updateWatchedListDisplay();
                     updateBlockListDisplay();
                     showScreen('start-screen');
                 }
-            }, (error) => {
-                console.error("Erro ao carregar filtro:", error);
-                // Mesmo com erro, mostra a tela inicial para o usuário tentar criar um perfil
+            }).catch((error) => {
+                console.error("Erro ao carregar filtro com getDoc:", error);
                 showScreen('start-screen');
             });
         }
@@ -1641,11 +1639,24 @@
             const resultDiv = document.getElementById('prediction-result');
             
             const cleanAnimeName = animeName.replace(/'/g, '').trim();
+            const lowerCaseAnimeName = cleanAnimeName.toLowerCase();
 
-            // Verifica se o anime está bloqueado
-            if (blockedAnimes.map(a => a.toLowerCase()).includes(cleanAnimeName.toLowerCase())) {
-                 displayFeedback('Anime Bloqueado', `Você bloqueou ${cleanAnimeName}. Não podemos analisar este título.`, '🚫');
-                 return;
+            const isWatched = watchedAnimes.map(a => a.toLowerCase()).includes(lowerCaseAnimeName);
+            const isBlocked = blockedAnimes.map(a => a.toLowerCase()).includes(lowerCaseAnimeName);
+
+            // Se estiver bloqueado, mostra a mensagem de bloqueio e para a execução.
+            if (isBlocked) {
+                displayFeedback('Anime Bloqueado', `Você bloqueou ${cleanAnimeName}. Não podemos analisar este título.`, '🚫');
+                justificationEl.innerHTML += `
+                    <div class="mt-6 pt-4 border-t border-gray-200 p-3 bg-red-100 rounded-xl flex items-center justify-between shadow-md">
+                        <p class="text-sm text-danger font-semibold flex items-center">
+                            🚫 Você marcou que não gostou deste anime.
+                        </p>
+                         <button onclick="unblockAnime('${cleanAnimeName.replace(/'/g, "\\'")}', true)" class="bg-secondary hover:bg-gray-700 text-white font-bold py-1 px-3 rounded-lg transition duration-300 text-xs shadow-sm">
+                            Desfazer
+                        </button>
+                    </div>`;
+                return;
             }
 
             const animeTags = jsonResponse.tags || [];
@@ -1654,7 +1665,6 @@
             const negativeMatches = [];
 
             animeTags.forEach(tag => {
-                // CORREÇÃO: Busca por tags que correspondem ao nosso filtro
                 const normalizedTag = Object.keys(userFilter).find(key => 
                     tag.toLowerCase().includes(key.toLowerCase()) || 
                     key.toLowerCase().includes(tag.toLowerCase())
@@ -1664,28 +1674,20 @@
                     const weight = userFilter[normalizedTag];
                     finalScore += weight;
 
-                    if (weight > 0) {
-                        positiveMatches.push({ tag: normalizedTag, weight: weight });
-                    } else if (weight < 0) {
-                        negativeMatches.push({ tag: normalizedTag, weight: weight });
-                    }
+                    if (weight > 0) positiveMatches.push({ tag: normalizedTag, weight: weight });
+                    else if (weight < 0) negativeMatches.push({ tag: normalizedTag, weight: weight });
                 }
             });
 
-            // --- Gerar Resultado Legível ---
-            const maxPositiveScore = 15; // Pontuação máxima teórica
-            const minNegativeScore = -15; // Pontuação mínima teórica
-            
+            const maxPositiveScore = 15;
+            const minNegativeScore = -15;
             let likelihood = Math.round(((finalScore - minNegativeScore) / (maxPositiveScore - minNegativeScore)) * 100);
             likelihood = Math.max(0, Math.min(100, likelihood)); 
 
             titleEl.textContent = `Previsão para ${cleanAnimeName}`;
             scoreEl.textContent = `${likelihood}% de Chance de Gostar`;
             
-            // --- LÓGICA DO VEREDITO E DETALHES ---
-            let verdictText = '';
-            let matchDetailsText = '';
-            let colorClass = '';
+            let verdictText, matchDetailsText, colorClass;
 
             if (likelihood >= 75) {
                 verdictText = 'ALTA COMPATIBILIDADE!';
@@ -1705,65 +1707,110 @@
                 colorClass = 'bg-danger/10 border-danger text-danger';
             }
             
-            // --- CONSTRUÇÃO DO HTML ESTRUTURADO ---
             let justificationHtml = `
                 <div class="space-y-4">
-                    <!-- Sinopse -->
                     <div>
-                        <p class="font-bold text-dark mb-1 flex items-center">
-                            <span class="text-lg mr-2">📖</span> Sinopse:
-                        </p>
+                        <p class="font-bold text-dark mb-1 flex items-center"><span class="text-lg mr-2">📖</span> Sinopse:</p>
                         <p class="text-sm text-gray-700 p-2 border-l-4 border-gray-300 bg-white shadow-inner rounded-r-md">${jsonResponse.sinopse || 'Não foi possível obter uma sinopse.'}</p>
                     </div>
-
-                    <!-- Detalhes do Veredito -->
                     <div>
-                        <p class="font-bold text-dark mb-1 flex items-center">
-                            <span class="text-lg mr-2">🎯</span> Veredito do Sistema:
-                        </p>
+                        <p class="font-bold text-dark mb-1 flex items-center"><span class="text-lg mr-2">🎯</span> Veredito do Sistema:</p>
                         <div class="p-4 rounded-xl shadow-md border-2 ${colorClass.split(' ').filter(c => c.startsWith('border-')).join(' ')} ${colorClass.split(' ').filter(c => c.startsWith('bg-')).join(' ')}">
                             <p class="font-extrabold text-lg ${colorClass.split(' ').filter(c => c.startsWith('text-')).join(' ')}">${verdictText}</p>
                             <p class="text-sm mt-2 text-gray-700">${matchDetailsText}</p>
                         </div>
                     </div>
-                    
-                    <!-- Tags -->
                     <div>
-                        <p class="font-bold text-dark mb-1 flex items-center">
-                            <span class="text-lg mr-2">🏷️</span> Tags de Gênero Encontradas:
-                        </p>
+                        <p class="font-bold text-dark mb-1 flex items-center"><span class="text-lg mr-2">🏷️</span> Tags de Gênero Encontradas:</p>
                         <p class="text-xs mt-1 text-gray-600">${animeTags.join(', ') || 'Nenhuma tag encontrada.'}</p>
                     </div>
-                </div>
-            `;
+                </div>`;
             
-            const isWatched = watchedAnimes.map(a => a.toLowerCase()).includes(cleanAnimeName.toLowerCase());
             let actionButtonHtml = '';
 
             if (!isWatched) {
                 actionButtonHtml = `
                     <div class="mt-6 pt-4 border-t border-gray-200 flex gap-4">
-                        <button onclick="addToWatched('${cleanAnimeName}')" class="flex-1 bg-success hover:bg-green-600 text-white font-bold py-2 px-4 rounded-xl transition duration-300 shadow-md">Adicionar aos Assistidos</button>
-                        <button onclick="blockAnime('${cleanAnimeName}', true)" class="flex-1 bg-danger hover:bg-red-600 text-white font-bold py-2 px-4 rounded-xl transition duration-300 shadow-md">Bloquear Anime (Não Sugerir Mais)</button>
-                    </div>
-                `;
+                        <button onclick="likeAnime('${cleanAnimeName.replace(/'/g, "\\'")}')" class="flex-1 bg-success hover:bg-green-600 text-white font-bold py-2 px-4 rounded-xl transition duration-300 shadow-md">Gostei 👍</button>
+                        <button onclick="blockAnime('${cleanAnimeName.replace(/'/g, "\\'")}', true)" class="flex-1 bg-danger hover:bg-red-600 text-white font-bold py-2 px-4 rounded-xl transition duration-300 shadow-md">Não Gostei 👎</button>
+                    </div>`;
             } else {
-                // Adiciona o botão de remover ao lado da mensagem
                 actionButtonHtml = `
                     <div class="mt-6 pt-4 border-t border-gray-200 p-3 bg-green-100 rounded-xl flex items-center justify-between shadow-md">
-                        <p class="text-sm text-success font-semibold flex items-center">
-                            ✅ Este anime já está na sua lista!
-                        </p>
-                        <button onclick="removeWatchedAnime('${cleanAnimeName.replace(/'/g, "\\'")}')" class="bg-danger hover:bg-red-700 text-white font-bold py-1 px-3 rounded-lg transition duration-300 text-xs shadow-sm">
-                            Remover
-                        </button>
-                    </div>
-                `;
+                        <p class="text-sm text-success font-semibold flex items-center">✅ Você já marcou que gostou deste anime!</p>
+                        <button onclick="removeWatchedAnime('${cleanAnimeName.replace(/'/g, "\\'")}')" class="bg-secondary hover:bg-gray-700 text-white font-bold py-1 px-3 rounded-lg transition duration-300 text-xs shadow-sm">Remover</button>
+                    </div>`;
             }
 
             justificationEl.innerHTML = justificationHtml + actionButtonHtml;
             resultDiv.classList.remove('hidden');
         }
+
+        /**
+         * Adiciona um anime à lista de "Gostei" (assistidos) e ATUALIZA o filtro de gosto.
+         */
+        async function likeAnime(animeName) {
+            const cleanAnimeName = animeName.replace(/'/g, '').trim();
+
+            if (!userFilter) {
+                displayFeedback('Filtro Inexistente', 'Você precisa criar um filtro antes de poder curtir um anime.', '');
+                return;
+            }
+            if (watchedAnimes.map(a => a.toLowerCase()).includes(cleanAnimeName.toLowerCase())) {
+                displayFeedback('Já Curtiu!', 'Este anime já está na sua lista de animes que você gostou.', '');
+                return;
+            }
+
+            showGlobalLoading(`Analisando e salvando ${cleanAnimeName}...`);
+
+            try {
+                // 1. Obter as tags do anime para aprender com elas
+                const analysisQuery = `Analise o anime "${cleanAnimeName}". Use o Google Search para encontrar informações e retorne APENAS um objeto JSON. O objeto deve conter "tags": um array com as tags/elementos mais fortes (use as tags: ${Object.keys(tagWeights).join(', ')}), e "sinopse": "Uma breve sinopse (1 frase)". Retorne APENAS o objeto JSON.`;
+                const analysisData = await callGeminiAPI(analysisQuery, false);
+                const animeTags = analysisData.tags || [];
+
+                // 2. Aplicar um reforço positivo no filtro do usuário para cada tag encontrada
+                if (animeTags.length > 0) {
+                    animeTags.forEach(tag => {
+                        if (userFilter[tag] !== undefined) {
+                            // Aplica um reforço positivo, similar a uma nota alta no quiz
+                            userFilter[tag] += POSITIVE_WEIGHT;
+                        }
+                    });
+                    Object.keys(userFilter).forEach(tag => {
+                        userFilter[tag] = parseFloat(userFilter[tag].toFixed(1));
+                    });
+                }
+
+                // 3. Atualizar as listas locais
+                watchedAnimes.push(cleanAnimeName);
+                blockedAnimes = blockedAnimes.filter(a => a.toLowerCase() !== cleanAnimeName.toLowerCase());
+
+                // 4. Salvar tudo no Firestore
+                const docRef = doc(db, `artifacts/${appId}/users/${userId}/anime_filters`, 'profile');
+                await setDoc(docRef, {
+                    filterData: userFilter,
+                    watchedAnimes: watchedAnimes,
+                    blockedAnimes: blockedAnimes
+                }, { merge: true });
+
+                // 5. Atualizar a UI para refletir o novo estado
+                updateWatchedListDisplay();
+                updateBlockListDisplay();
+                // Re-renderiza o card de previsão para mostrar que o anime foi adicionado
+                await applyPrediction(analysisData, cleanAnimeName);
+                // Fornece um feedback claro na parte superior
+                displayFeedback(`${cleanAnimeName} Adicionado!`, 'Seu filtro foi aprimorado com base nesta escolha.', '👍');
+
+
+            } catch (error) {
+                console.error("Erro ao curtir e analisar o anime:", error);
+                displayFeedback('Erro ao Curtir', `Não foi possível analisar e salvar o anime. ${error.message}`, '');
+            } finally {
+                hideGlobalLoading();
+            }
+        }
+        window.likeAnime = likeAnime;
 
 
         /**
