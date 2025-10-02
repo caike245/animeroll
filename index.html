@@ -1036,41 +1036,75 @@
         window.closeBlockListModal = closeBlockListModal;
 
         /**
-         * Adiciona um anime à lista de bloqueio no estado local e no Firestore.
+         * Adiciona um anime à lista de bloqueio e ATUALIZA o filtro de gosto com base nas tags do anime.
          */
         async function blockAnime(animeName, shouldShowLoading = true) {
             const cleanAnimeName = animeName.replace(/'/g, '').trim();
 
             if (!cleanAnimeName || blockedAnimes.map(a => a.toLowerCase()).includes(cleanAnimeName.toLowerCase())) {
                 displayFeedback(`${cleanAnimeName} já está bloqueado!`, 'O sistema já sabe para não sugerir este anime.', '');
-                return; 
+                return;
             }
-            
-            // Remove da lista de assistidos se estiver lá
-            if (watchedAnimes.map(a => a.toLowerCase()).includes(cleanAnimeName.toLowerCase())) {
-                await removeWatchedAnime(cleanAnimeName, false); // Não mostra loading
+
+            if (!userFilter) {
+                displayFeedback('Filtro Inexistente', 'Você precisa criar um filtro antes de poder bloqueá-lo e nos ensinar o que você não gosta.', '');
+                return;
             }
-            
-            blockedAnimes.push(cleanAnimeName);
-            
-            const docRef = doc(db, `artifacts/${appId}/users/${userId}/anime_filters`, 'profile');
-            
-            if (shouldShowLoading) showGlobalLoading(`Bloqueando ${cleanAnimeName} e salvando lista...`);
+
+            if (shouldShowLoading) showGlobalLoading(`Analisando e bloqueando ${cleanAnimeName}...`);
 
             try {
-                await setDoc(docRef, {
-                    blockedAnimes: blockedAnimes,
-                    watchedAnimes: watchedAnimes // Salva a lista de assistidos atualizada (caso tenha sido removido)
-                }, { merge: true });
-                
-                updateBlockListDisplay();
-                updateWatchedListDisplay(); // Atualiza display de assistidos
-                if (shouldShowLoading) displayFeedback(`${cleanAnimeName} Bloqueado!`, 'Este anime não será mais sugerido.', '');
+                // 1. Obter as tags do anime para aprender com elas
+                const analysisQuery = `Analise o anime "${cleanAnimeName}". Use o Google Search para encontrar informações e retorne APENAS um objeto JSON. O objeto deve conter "tags": um array com as tags/elementos mais fortes (use as tags: ${Object.keys(tagWeights).join(', ')}). Retorne APENAS o objeto JSON.`;
+                const analysisData = await callGeminiAPI(analysisQuery, false);
+                const animeTags = analysisData.tags || [];
 
-            } catch (e) {
-                console.error("Erro ao salvar lista de bloqueio: ", e);
-                blockedAnimes.pop();
-                if (shouldShowLoading) displayFeedback('Erro ao Salvar', 'Falha ao salvar a lista no banco de dados. Tente novamente.', '');
+                // 2. Aplicar uma forte penalidade no filtro do usuário para cada tag encontrada
+                if (animeTags.length > 0) {
+                    animeTags.forEach(tag => {
+                        if (userFilter[tag] !== undefined) {
+                            // Aplica uma penalidade forte, similar a uma nota 0 no quiz
+                            userFilter[tag] += NEGATIVE_WEIGHT * 2;
+                        }
+                    });
+                     // Normaliza os pesos para evitar números muito grandes
+                    Object.keys(userFilter).forEach(tag => {
+                        userFilter[tag] = parseFloat(userFilter[tag].toFixed(1));
+                    });
+                }
+
+                // 3. Atualizar as listas locais
+                // Remove da lista de assistidos se estiver lá
+                const wasWatched = watchedAnimes.map(a => a.toLowerCase()).includes(cleanAnimeName.toLowerCase());
+                if (wasWatched) {
+                    watchedAnimes = watchedAnimes.filter(a => a.toLowerCase() !== cleanAnimeName.toLowerCase());
+                }
+
+                blockedAnimes.push(cleanAnimeName);
+
+                // 4. Salvar tudo (filtro atualizado e listas) no Firestore em uma única operação
+                const docRef = doc(db, `artifacts/${appId}/users/${userId}/anime_filters`, 'profile');
+                await setDoc(docRef, {
+                    filterData: userFilter,
+                    blockedAnimes: blockedAnimes,
+                    watchedAnimes: watchedAnimes
+                }, { merge: true });
+
+                // 5. Atualizar a UI e fornecer feedback
+                updateBlockListDisplay();
+                updateWatchedListDisplay();
+                if (shouldShowLoading) {
+                    const feedbackMessage = animeTags.length > 0
+                        ? `Este anime e outros com elementos de ${animeTags.join(', ')} serão menos recomendados.`
+                        : 'Este anime não será mais sugerido.';
+                    displayFeedback(`${cleanAnimeName} Bloqueado!`, feedbackMessage, '🚫');
+                }
+
+            } catch (error) {
+                console.error("Erro ao analisar e bloquear o anime:", error);
+                if (shouldShowLoading) displayFeedback('Erro no Bloqueio', `Não foi possível analisar e bloquear o anime. ${error.message}`, '');
+                // Como a operação pode ter falhado no meio, não revertemos o estado local para evitar inconsistência.
+                // O usuário pode tentar novamente.
             } finally {
                 if (shouldShowLoading) hideGlobalLoading();
             }
@@ -1312,8 +1346,14 @@
             
             currentQuizData.forEach((item, index) => {
                 const questionHtml = `
-                    <div class="mb-4 p-3 border border-gray-300 rounded-xl shadow-sm bg-gray-50">
-                        <label for="rating-${index}" class="block text-lg font-medium text-dark mb-1">${item.name}</label>
+                    <div class="mb-4 p-3 border border-gray-300 rounded-xl shadow-sm bg-gray-50" id="question-container-${index}">
+                        <div class="flex justify-between items-center mb-2">
+                            <label for="rating-${index}" class="block text-lg font-medium text-dark">${item.name}</label>
+                            <label class="text-xs text-gray-500 flex items-center">
+                                <input type="checkbox" id="not-watched-${index}" onchange="toggleRating(${index})" class="mr-1 h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary">
+                                Não Assisti
+                            </label>
+                        </div>
                         <p class="text-sm text-gray-500 mb-2">${item.description}</p>
                         <input type="range" id="rating-${index}" name="rating-${index}" min="0" max="10" value="5" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg">
                         <div class="flex justify-between text-sm mt-1">
@@ -1339,51 +1379,67 @@
 
 
         /**
+         * Habilita/desabilita o controle de rating baseado no checkbox "Não Assisti".
+         * @param {number} index - O índice da questão do quiz.
+         */
+        function toggleRating(index) {
+            const checkbox = document.getElementById(`not-watched-${index}`);
+            const ratingInput = document.getElementById(`rating-${index}`);
+            const questionContainer = document.getElementById(`question-container-${index}`);
+            const valueDisplay = document.getElementById(`value-${index}`);
+
+            if (checkbox.checked) {
+                ratingInput.disabled = true;
+                questionContainer.classList.add('opacity-50');
+                valueDisplay.textContent = '-';
+            } else {
+                ratingInput.disabled = false;
+                questionContainer.classList.remove('opacity-50');
+                valueDisplay.textContent = ratingInput.value;
+            }
+        }
+        window.toggleRating = toggleRating;
+
+        /**
          * Calcula o filtro e o salva no Firestore.
          */
         async function submitRatings() {
             const ratings = [];
-            let isValid = true;
+            let ratedAnimesCount = 0;
 
-            currentQuizData.forEach((_, index) => {
-                const input = document.getElementById(`rating-${index}`);
-                if (input && input.value !== "") {
-                    ratings.push(parseInt(input.value));
-                } else {
-                    isValid = false;
+            currentQuizData.forEach((item, index) => {
+                const checkbox = document.getElementById(`not-watched-${index}`);
+                if (!checkbox.checked) {
+                    const input = document.getElementById(`rating-${index}`);
+                    ratings.push({ rating: parseInt(input.value), anime: item });
+                    ratedAnimesCount++;
                 }
             });
 
-            if (!isValid) {
+            if (ratedAnimesCount === 0) {
+                displayFeedback('Nenhuma Avaliação', 'Você precisa avaliar pelo menos um anime para criar seu filtro.', '');
                 return;
             }
 
             // --- 1. Calcular Pesos do Filtro ---
             const calculatedWeights = { ...tagWeights };
-            currentQuizData.forEach((item, index) => {
-                const rating = ratings[index];
-                const scoreDelta = rating - 5; // Positivo se gostou, Negativo se odiou
+            ratings.forEach(ratedItem => {
+                const { rating, anime } = ratedItem;
+                const scoreDelta = rating - 5;
 
-                item.tags.forEach(tag => {
-                    // Se a nota for alta (8, 9, 10)
+                anime.tags.forEach(tag => {
                     if (rating >= 8) {
                         calculatedWeights[tag] += POSITIVE_WEIGHT;
-                    } 
-                    // Se a nota for baixa (0, 1, 2)
-                    else if (rating <= 2) {
-                        calculatedWeights[tag] += NEGATIVE_WEIGHT * 2; // Penalidade maior
-                    }
-                    // Notas neutras (3 a 7)
-                    else if (rating < 5) {
+                    } else if (rating <= 2) {
+                        calculatedWeights[tag] += NEGATIVE_WEIGHT * 2;
+                    } else if (rating < 5) {
                         calculatedWeights[tag] += NEGATIVE_WEIGHT / 2;
                     } else if (rating > 5) {
                         calculatedWeights[tag] += NEUTRAL_WEIGHT;
                     }
-                    // Nota 5 é zero.
                 });
             });
             
-            // Normalizar os pesos para evitar números muito grandes, mantendo a proporção
             Object.keys(calculatedWeights).forEach(tag => {
                 calculatedWeights[tag] = parseFloat(calculatedWeights[tag].toFixed(1));
             });
@@ -1397,20 +1453,18 @@
             try {
                 await setDoc(docRef, {
                     userId: userId,
-                    ratings: ratings,
+                    ratings: ratings.map(r => ({ anime: r.anime.name, rating: r.rating })), // Salva de forma mais limpa
                     filterData: userFilter,
-                    watchedAnimes: watchedAnimes, // Salva a lista de assistidos
-                    blockedAnimes: blockedAnimes, // Salva a lista de bloqueio
+                    watchedAnimes: watchedAnimes,
+                    blockedAnimes: blockedAnimes,
                     timestamp: new Date().toISOString()
                 }, { merge: true });
                 console.log("Filtro salvo com sucesso!");
                 
-                // 3. Navega para a aba de previsão após salvar
                 showScreen('main-tabs-screen');
                 changeTab('prediction'); 
             } catch (e) {
                 console.error("Erro ao salvar o filtro: ", e);
-                // Em caso de falha, ainda permite que o usuário use o filtro em memória
                 showScreen('main-tabs-screen');
                 changeTab('prediction'); 
             } finally {
